@@ -2,7 +2,7 @@
 #define CUBIC_TMULT_HELPERS_H
 
 #include "congestion_control.h"
-#include <ebpf/bpf_helpers.h>
+#include <bpf/bpf_helpers.h>
 
 /*
  * Always inline is used bc I am telling the compiler what to do, not suggesting

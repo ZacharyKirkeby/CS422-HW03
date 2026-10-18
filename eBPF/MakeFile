@@ -2,7 +2,7 @@ CLANG ?= clang
 BPFTOOL ?= bpftool
 
 TARGET_ARCH ?= x86
-BPF_CFLAGS := -O2 -g -Wall -Wextra -Werror -target bpf \
+BPF_CFLAGS := -O2 -g -Wall -Wextra -Werror -Wno-missing-declarations -target bpf \
 	-D__TARGET_ARCH_$(TARGET_ARCH) -I.
 
 BPF_SRC := congestion_control.bpf.c
