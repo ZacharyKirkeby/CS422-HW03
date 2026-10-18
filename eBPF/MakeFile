@@ -1,41 +1,36 @@
-CLANG   ?= clang
+CLANG ?= clang
 BPFTOOL ?= bpftool
-ARCH    := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 
-INCLUDES := includes
-MODULE   := module
+TARGET_ARCH ?= x86
+BPF_CFLAGS := -O2 -g -Wall -Wextra -Werror -target bpf \
+	-D__TARGET_ARCH_$(TARGET_ARCH) -I.
 
-CFLAGS_BPF  := -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) -I$(INCLUDES) \
-               -Wall -Wno-unused-value -Wno-pointer-sign
-LDLIBS_USER := -lbpf -lelf -lz
-
-PIN_PATH := /sys/fs/bpf/mycc_link
+BPF_SRC := congestion_control.bpf.c
+BPF_OBJ := cubic_tmult.bpf.o
+VMLINUX := vmlinux.h
 
 .PHONY: all clean load unload verify
 
-all: $(INCLUDES)/vmlinux.h congestion_control_bpf.o congestion_control_loader
+all: $(BPF_OBJ)
 
-$(INCLUDES)/vmlinux.h:
-	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $(INCLUDES)/vmlinux.h
+$(VMLINUX):
+	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $@
 
-congestion_control_bpf.o: $(MODULE)/congestion_control.bpf.c \
-                           $(INCLUDES)/congestion_control.bpf.h \
-                           $(INCLUDES)/vmlinux.h
-	$(CLANG) $(CFLAGS_BPF) -c $(MODULE)/congestion_control.bpf.c -o congestion_control_bpf.o
+$(BPF_OBJ): $(BPF_SRC) congestion_control.h congestion_helpers.h $(VMLINUX)
+	$(CLANG) $(BPF_CFLAGS) -c $(BPF_SRC) -o $(BPF_OBJ)
 
-congestion_control_loader: $(MODULE)/congestion_control_loader.c \
-                            $(INCLUDES)/congestion_control_loader.h
-	$(CC) -g -O2 -Wall -I$(INCLUDES) $(MODULE)/congestion_control_loader.c \
-		-o congestion_control_loader $(LDLIBS_USER)
-
-load: all
-	sudo ./congestion_control_loader
-
-verify:
-	sysctl net.ipv4.tcp_available_congestion_control
+load: $(BPF_OBJ)
+	-sudo $(BPFTOOL) struct_ops unregister name cubic_tmult_ops 2>/dev/null
+	sudo $(BPFTOOL) struct_ops register $(BPF_OBJ)
+	@echo "available: $$(cat /proc/sys/net/ipv4/tcp_available_congestion_control)"
 
 unload:
-	sudo rm -f $(PIN_PATH)
+	sudo $(BPFTOOL) struct_ops unregister name cubic_tmult_ops
 
-clean: unload
-	rm -f $(INCLUDES)/vmlinux.h congestion_control_bpf.o congestion_control_loader
+verify:
+	@echo "kernel: $$(uname -r)"
+	@echo "available: $$(cat /proc/sys/net/ipv4/tcp_available_congestion_control)"
+	@$(BPFTOOL) struct_ops show
+
+clean:
+	rm -f $(BPF_OBJ) $(VMLINUX)
