@@ -34,7 +34,7 @@ unload:
 verify:
 	@echo "kernel: $$(uname -r)"
 	@echo "available: $$(cat /proc/sys/net/ipv4/tcp_available_congestion_control)"
-	@$(BPFTOOL) struct_ops show
+	@sudo $(BPFTOOL) struct_ops show
 
 clean:
 	rm -f $(BPF_OBJ) $(VMLINUX)

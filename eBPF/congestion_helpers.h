@@ -15,6 +15,7 @@
 static __always_inline struct tcp_sock *tmult_tcp_sk(const struct sock *sk);
 static __always_inline struct tmult_state *tmult_ca(const struct sock *sk); 
 static __always_inline __u32 tmult_clamp_cwnd(const struct tcp_sock *tp, __u64 cwnd);
+static __always_inline __u32 tmult_fls64(__u64 value);
 static __always_inline __u32 tmult_cuberoot_u64(__u64 value);
 static __always_inline __u32 tmult_calc_k_q10(__u32 w_max);
 static __always_inline __u64 tmult_elapsed_q10(const struct tmult_state *ca, __u64 now_ns);
@@ -22,23 +23,36 @@ static __always_inline __u32 tmult_cubic_target(const struct tmult_state *ca, __
 static __always_inline __u32 tmult_friendly_target(__u32 cwnd, __u64 t_q10);
 static __always_inline void tmult_reset(struct tmult_state *ca);
 
-static const __u8 tmult_cbrt_table[64] = {
-	0,   54,  54,  54,  118, 118, 118, 118,
-	123, 129, 134, 138, 143, 147, 151, 156,
-	157, 161, 164, 168, 170, 173, 176, 179,
-	181, 185, 187, 190, 192, 194, 197, 199,
-	200, 202, 204, 206, 209, 211, 213, 215,
-	217, 219, 221, 222, 224, 225, 227, 229,
-	231, 232, 234, 236, 237, 239, 240, 242,
-	244, 245, 246, 248, 250, 251, 252, 254,
-};
-
 static __always_inline __u32 tmult_fls64(__u64 value)
 {
-	if (!value)
-		return 0;
+    __u32 bit = 0;
 
-	return 64 - __builtin_clzll(value);
+    if (!value)
+        return 0;
+    if (value >> 32) {
+        value >>= 32;
+        bit += 32;
+    }
+    if (value >> 16) {
+        value >>= 16;
+        bit += 16;
+    }
+    if (value >> 8) {
+        value >>= 8;
+        bit += 8;
+    }
+    if (value >> 4) {
+        value >>= 4;
+        bit += 4;
+    }
+    if (value >> 2) {
+        value >>= 2;
+        bit += 2;
+    }
+    if (value >> 1)
+        bit++;
+
+    return bit + 1;
 }
 
 // casts the kernel generic socket type sock to a tcp socket
@@ -71,42 +85,50 @@ static __always_inline __u32 tmult_clamp_cwnd(const struct tcp_sock *tp, __u64 c
 // this just does a cube root
 static __always_inline __u32 tmult_cuberoot_u64(__u64 value)
 {
-	__u32 bits;
-	__u32 scale;
-	__u32 index;
-	__u32 x;
-	__u64 x2;
+    __u32 bits;
+    __u32 shift;
+    __u32 guess;
+    __u64 square;
 
-	if (value < 64)
-		return ((__u32)tmult_cbrt_table[value] + 35) >> 6;
+    // trust the process i know it looks dumb
+    if (value < 1)
+        return 0;
+    if (value < 8)
+        return 1;
+    if (value < 27)
+        return 2;
+    if (value < 64)
+        return 3;
 
-	bits = tmult_fls64(value);
-	scale = ((bits * 84) >> 8);
+    bits = tmult_fls64(value);
+    shift = (bits + 2) / 3;
 
-	if (scale)
-		scale--;
+    if (shift > 22)
+        shift = 22;
 
-	index = (__u32)(value >> (scale * 3));
+    guess = 1U << shift;
 
-	/* verifier bound for table lookup */
-	if (index >= 64)
-		return 0;
+    square = (__u64)guess * guess;
+    if (square)
+        guess = (__u32)((2ULL * guess + value / square) / 3ULL);
 
-	x = ((__u32)(tmult_cbrt_table[index] + 10) << scale) >> 6;
+    square = (__u64)guess * guess;
+    if (square)
+        guess = (__u32)((2ULL * guess + value / square) / 3ULL);
 
-	if (x <= 1)
-		return 1;
+    square = (__u64)guess * guess;
+    if (square)
+        guess = (__u32)((2ULL * guess + value / square) / 3ULL);
 
-	x2 = (__u64)x * x;
+    square = (__u64)guess * guess;
+    if (square)
+        guess = (__u32)((2ULL * guess + value / square) / 3ULL);
 
-	if (!x2)
-		return x;
+    square = (__u64)guess * guess;
+    if (square)
+        guess = (__u32)((2ULL * guess + value / square) / 3ULL);
 
-	x = (__u32)(
-		(2ULL * x + value / x2) / 3ULL
-	);
-
-	return x;
+    return guess;
 }
 
 // cubic k formula from the psuedocode
