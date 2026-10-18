@@ -36,6 +36,7 @@
 
 struct tmult_state {
     __u64 epoch_start_ns;
+    __u64 friendly_acked;
     __u32 w_max;
     __u32 w_tcp;
     __u32 k_q10;

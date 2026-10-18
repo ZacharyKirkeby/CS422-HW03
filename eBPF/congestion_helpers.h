@@ -20,8 +20,10 @@ static __always_inline __u32 tmult_cuberoot_u64(__u64 value);
 static __always_inline __u32 tmult_calc_k_q10(__u32 w_max);
 static __always_inline __u64 tmult_elapsed_q10(const struct tmult_state *ca, __u64 now_ns);
 static __always_inline __u32 tmult_cubic_target(const struct tmult_state *ca, __u64 t_q10);
-static __always_inline __u32 tmult_friendly_target(__u32 cwnd, __u64 t_q10);
-static __always_inline void tmult_reset(struct tcp_sock *tp, struct tmult_state *ca);
+static __always_inline __u32 tmult_friendly_target(struct tmult_state *ca, __u32 cwnd, __u32 acked);
+static __always_inline __u32 tmult_target_cnt(__u32 cwnd, __u32 target);
+static __always_inline void tmult_cong_avoid_ai(struct tcp_sock *tp, __u32 cnt, __u32 acked);
+static __always_inline void tmult_reset(struct tmult_state *ca);
 
 static __always_inline __u32 tmult_fls64(__u64 value)
 {
@@ -160,16 +162,16 @@ static __always_inline __u64 tmult_elapsed_q10(const struct tmult_state *ca, __u
 // cubic target window calculation
 static __always_inline __u32 tmult_cubic_target(const struct tmult_state *ca, __u64 t_q10)
 {
-    __s64 offset_q10 = (__s64)t_q10 - (__s64)ca->k_q10;
-    __s64 scaled_q10 = (offset_q10 * TMULT_T_NUM) / TMULT_T_DEN;
+    __s64 scaled_t_q10 = ((__s64)t_q10 * TMULT_T_NUM) / TMULT_T_DEN;
+    __s64 offset_q10 = scaled_t_q10 - (__s64)ca->k_q10;
     __u64 magnitude_q10;
     __u64 cube;
     __u64 delta;
 
-    if (scaled_q10 < 0)
-        magnitude_q10 = (__u64)(-scaled_q10);
+    if (offset_q10 < 0)
+        magnitude_q10 = (__u64)(-offset_q10);
     else
-        magnitude_q10 = (__u64)scaled_q10;
+        magnitude_q10 = (__u64)offset_q10;
 
     if (magnitude_q10 > TMULT_MAX_SCALED_TIME)
         magnitude_q10 = TMULT_MAX_SCALED_TIME;
@@ -177,7 +179,7 @@ static __always_inline __u32 tmult_cubic_target(const struct tmult_state *ca, __
     cube = magnitude_q10 * magnitude_q10 * magnitude_q10;
     delta = (TMULT_C_NUM * cube) / (TMULT_C_DEN * (1ULL << TMULT_CUBE_SHIFT));
 
-    if (scaled_q10 < 0) {
+    if (offset_q10 < 0) {
         if (delta >= ca->w_max)
             return TMULT_MIN_CWND;
         return ca->w_max - (__u32)delta;
@@ -190,36 +192,111 @@ static __always_inline __u32 tmult_cubic_target(const struct tmult_state *ca, __
 }
 
 // the fallback algorithm
-static __always_inline __u32 tmult_friendly_target(__u32 cwnd, __u64 t_q10)
+static __always_inline __u32 tmult_friendly_target(struct tmult_state *ca, __u32 cwnd, __u32 acked)
 {
-    __u64 numerator;
-    __u64 denominator;
+    __u64 alpha_num;
+    __u64 alpha_den;
+    __u64 threshold;
     __u64 increase;
 
     if (!cwnd)
         return TMULT_MIN_CWND;
 
-    /* W_old = cwnd + (3B / (2-B)) * t / cwnd. */
-    numerator = 3ULL * TMULT_B_NUM * t_q10;
-    denominator = (2ULL * TMULT_B_DEN - TMULT_B_NUM) * TMULT_TIME_ONE * cwnd;
-    increase = denominator ? numerator / denominator : 0;
+    if (!ca->w_tcp)
+        ca->w_tcp = cwnd;
 
-    if (increase > 0xffffffffULL - cwnd)
+    /*
+     * alpha = 3(1-B) / (1+B)
+     * Increase W_tcp by one for approximately cwnd / alpha ACKed packets.
+     */
+    alpha_num = 3ULL * TMULT_ONE_MINUS_B_NUM;
+    alpha_den = TMULT_B_DEN + TMULT_B_NUM;
+
+    threshold = (alpha_den * cwnd + alpha_num - 1) / alpha_num;
+    if (!threshold)
+        threshold = 1;
+
+    ca->friendly_acked += acked;
+
+    increase = ca->friendly_acked / threshold;
+    ca->friendly_acked %= threshold;
+
+    if (increase > 0xffffffffULL - ca->w_tcp)
         return 0xffffffffU;
 
-    return cwnd + (__u32)increase;
+    ca->w_tcp += (__u32)increase;
+
+    return ca->w_tcp;
+}
+
+// converts a target window into the number of ACKs between cwnd increases
+static __always_inline __u32 tmult_target_cnt(__u32 cwnd, __u32 target)
+{
+    __u64 slow;
+    __u32 diff;
+    __u32 cnt;
+
+    if (!cwnd)
+        return 2;
+
+    if (target > cwnd) {
+        diff = target - cwnd;
+        cnt = cwnd / diff;
+
+        if (cnt < 2)
+            cnt = 2;
+
+        return cnt;
+    }
+
+    slow = 100ULL * cwnd;
+    if (slow > 0xffffffffULL)
+        slow = 0xffffffffULL;
+
+    if (slow < 2)
+        slow = 2;
+
+    return (__u32)slow;
+}
+
+// increases cwnd according to the target rate without directly jumping to target
+static __always_inline void tmult_cong_avoid_ai(struct tcp_sock *tp, __u32 cnt, __u32 acked)
+{
+    __u64 credit;
+    __u64 delta;
+
+    if (cnt < 2)
+        cnt = 2;
+
+    if (tp->snd_cwnd_cnt >= cnt) {
+        tp->snd_cwnd_cnt = 0;
+        tp->snd_cwnd = tmult_clamp_cwnd(tp, (__u64)tp->snd_cwnd + 1);
+    }
+
+    credit = (__u64)tp->snd_cwnd_cnt + acked;
+
+    if (credit >= cnt) {
+        delta = credit / cnt;
+        credit -= delta * cnt;
+
+        tp->snd_cwnd = tmult_clamp_cwnd(
+            tp,
+            (__u64)tp->snd_cwnd + delta
+        );
+    }
+
+    tp->snd_cwnd_cnt = (__u32)credit;
 }
 
 // reset the state machine
-static __always_inline void tmult_reset(struct tcp_sock *tp, struct tmult_state *ca)
+static __always_inline void tmult_reset(struct tmult_state *ca)
 {
     ca->epoch_start_ns = 0;
+    ca->friendly_acked = 0;
     ca->w_max = 0;
     ca->w_tcp = 0;
     ca->k_q10 = 0;
     ca->reserved = 0;
-
-    tp->snd_ssthresh = TMULT_INF_SSTHRESH;
 }
 
 #endif
