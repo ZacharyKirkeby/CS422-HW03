@@ -1,8 +1,6 @@
 #ifndef CONGESTION_CONTROL_H
 #define CONGESTION_CONTROL_H
 
-#include "vmlinux.h"
-
 #define TMULT_NAME                  "cubic_tmult"
 #define TMULT_MIN_CWND              2U
 #define TMULT_INIT_CWND             10U
