@@ -21,7 +21,7 @@ static __always_inline __u32 tmult_calc_k_q10(__u32 w_max);
 static __always_inline __u64 tmult_elapsed_q10(const struct tmult_state *ca, __u64 now_ns);
 static __always_inline __u32 tmult_cubic_target(const struct tmult_state *ca, __u64 t_q10);
 static __always_inline __u32 tmult_friendly_target(__u32 cwnd, __u64 t_q10);
-static __always_inline void tmult_reset(struct tmult_state *ca);
+static __always_inline void tmult_reset(struct tcp_sock *tp, struct tmult_state *ca);
 
 static __always_inline __u32 tmult_fls64(__u64 value)
 {
@@ -211,13 +211,15 @@ static __always_inline __u32 tmult_friendly_target(__u32 cwnd, __u64 t_q10)
 }
 
 // reset the state machine
-static __always_inline void tmult_reset(struct tmult_state *ca)
+static __always_inline void tmult_reset(struct tcp_sock *tp, struct tmult_state *ca)
 {
     ca->epoch_start_ns = 0;
     ca->w_max = 0;
     ca->w_tcp = 0;
     ca->k_q10 = 0;
     ca->reserved = 0;
+
+    tp->snd_ssthresh = TMULT_INF_SSTHRESH;
 }
 
 #endif

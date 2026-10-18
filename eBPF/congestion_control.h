@@ -4,6 +4,7 @@
 #define TMULT_NAME                  "cubic_tmult"
 #define TMULT_MIN_CWND              2U
 #define TMULT_INIT_CWND             10U
+#define TMULT_INF_SSTHRESH          0x7fffffffU
 
 /* C = 0.5 */
 #define TMULT_C_NUM                 1ULL

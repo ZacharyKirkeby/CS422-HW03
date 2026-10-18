@@ -18,11 +18,11 @@ void BPF_PROG(cubic_tmult_init, struct sock *sk)
     struct tcp_sock *tp = tmult_tcp_sk(sk);
     struct tmult_state *ca = tmult_ca(sk);
 
-    tmult_reset(ca);
-
-    /* cwnd <- cwnd_init; ssthresh <- min_cwnd. */
+    /* cwnd <- cwnd_init. */
     tp->snd_cwnd = tmult_clamp_cwnd(tp, TMULT_INIT_CWND);
-    tp->snd_ssthresh = TMULT_MIN_CWND;
+
+    /* reset(): W_max <- 0, W_tcp <- 0, K <- 0, ssthresh <- infinity. */
+    tmult_reset(tp, ca);
 }
 
 SEC("struct_ops")
@@ -36,21 +36,19 @@ __u32 BPF_PROG(cubic_tmult_ssthresh, struct sock *sk)
     /* packetLost(): W_max <- cwnd. */
     ca->w_max = tp->snd_cwnd;
 
-    /* cwnd <- cwnd * B. */
-    reduced_cwnd = (__u32)(((__u64)tp->snd_cwnd * TMULT_B_NUM) / TMULT_B_DEN);
-    reduced_cwnd = tmult_clamp_cwnd(tp, reduced_cwnd);
+    /* ssthresh <- W_max * B. */
+    ssthresh = (__u32)(((__u64)ca->w_max * TMULT_B_NUM) / TMULT_B_DEN);
+    ssthresh = tmult_clamp_cwnd(tp, ssthresh);
+    tp->snd_ssthresh = ssthresh;
+
+    /* cwnd <- W_max * B. */
+    reduced_cwnd = ssthresh;
     tp->snd_cwnd = reduced_cwnd;
 
     /* Start a new loss epoch and calculate K. */
     ca->epoch_start_ns = bpf_ktime_get_ns();
     ca->k_q10 = tmult_calc_k_q10(ca->w_max);
 
-    /* ssthresh <- cwnd * (1 - B), using the already reduced cwnd. */
-    ssthresh = (__u32)(((__u64)reduced_cwnd * TMULT_ONE_MINUS_B_NUM) / TMULT_B_DEN);
-    if (ssthresh < TMULT_MIN_CWND)
-        ssthresh = TMULT_MIN_CWND;
-
-    tp->snd_ssthresh = ssthresh;
     return ssthresh;
 }
 
@@ -73,7 +71,7 @@ void BPF_PROG(cubic_tmult_cong_avoid, struct sock *sk, __u32 ack, __u32 acked)
 
     /* ackReceived(): slow-start case. */
     if (tp->snd_cwnd < tp->snd_ssthresh) {
-        tp->snd_cwnd = tmult_clamp_cwnd(tp, (__u64)tp->snd_cwnd + acked);
+        tp->snd_cwnd = tmult_clamp_cwnd(tp, (__u64)tp->snd_cwnd + 1);
         return;
     }
 
@@ -87,10 +85,12 @@ void BPF_PROG(cubic_tmult_cong_avoid, struct sock *sk, __u32 ack, __u32 acked)
 
     /* W_tcp = C * (T_mult * (t - K))^3 + W_max. */
     cubic_target = tmult_cubic_target(ca, t_q10);
+    ca->w_tcp = cubic_target;
 
     /* W_old = cwnd + (3B / (2-B)) * t / cwnd. */
     friendly_target = tmult_friendly_target(tp->snd_cwnd, t_q10);
-    ca->w_tcp = friendly_target;
+
+    /* cwnd <- max(W_tcp, W_old). */
     target = cubic_target > friendly_target ? cubic_target : friendly_target;
 
     /* cwnd must always be at least W_max * beta. */
@@ -104,11 +104,12 @@ void BPF_PROG(cubic_tmult_cong_avoid, struct sock *sk, __u32 ack, __u32 acked)
 SEC("struct_ops")
 void BPF_PROG(cubic_tmult_cwnd_event, struct sock *sk, enum tcp_ca_event event)
 {
+    struct tcp_sock *tp = tmult_tcp_sk(sk);
     struct tmult_state *ca = tmult_ca(sk);
 
     /* timeout(): reset(). Linux reports retransmission timeout as CA_EVENT_LOSS. */
     if (event == CA_EVENT_LOSS)
-        tmult_reset(ca);
+        tmult_reset(tp, ca);
 }
 
 SEC("struct_ops")
