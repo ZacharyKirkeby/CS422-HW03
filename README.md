@@ -3,7 +3,7 @@ eBPF moment
 
 ## Option 1: eBPF module
 
-Built/tested on Arch Linux 7.2.x. The module uses the running kernel's BTF information to generate `vmlinux.h`, so it should be rebuilt after a kernel update before loading.
+Built/tested on Arch Linux kernel `7.2.11-arch1-1`, broadly compatible with Linux Kernel 7.2.x. The module uses the running kernel's BTF information to generate `vmlinux.h`, so it should be rebuilt after any kernel update before loading.
 
 ### Dependencies
 
